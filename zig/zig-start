@@ -1,0 +1,88 @@
+#!/bin/bash
+# Build the Zig project in the current directory and run what it produced.
+#
+#   Ziex app (build.zig.zon names ziex): zig build, zx bundle, run the bundle.
+#   Anything else: zig build, run the executable from zig-out/bin.
+#
+# Environment:
+#   ZIG_OPTIMIZE    Debug | ReleaseSafe | ReleaseFast | ReleaseSmall (ReleaseSafe)
+#   ZIG_BUILD_ARGS  extra arguments for `zig build`
+#   ZIG_BIN         executable to run; blank picks the only one there is
+#   SERVER_PORT     exported as PORT, which Ziex and most servers read
+#
+# Everything this script says goes to stderr: some entrypoints capture the
+# startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[zig-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f build.zig ]; then
+    say "No build.zig in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+optimize="${ZIG_OPTIMIZE:-ReleaseSafe}"
+case "$optimize" in
+    Debug|ReleaseSafe|ReleaseFast|ReleaseSmall) ;;
+    *) say "ZIG_OPTIMIZE must be Debug, ReleaseSafe, ReleaseFast or ReleaseSmall, not '$optimize'."; exit 1 ;;
+esac
+
+# -Doptimize exists only when build.zig asks for it (standardOptimizeOption);
+# passing it to a build script that does not is "invalid option".
+opt_flag=()
+if grep -qs 'standardOptimizeOption\|"optimize"' build.zig; then
+    opt_flag=("-Doptimize=$optimize")
+else
+    say "build.zig declares no optimize option; building as it decides."
+fi
+
+export PORT="${PORT:-${SERVER_PORT:-3000}}"
+export ADDRESS="${ADDRESS:-0.0.0.0}"
+
+# The only executable directly inside a directory, or the one ZIG_BIN names.
+pick_bin() {
+    local dir="$1"
+    if [ -n "${ZIG_BIN:-}" ]; then
+        [ -x "$dir/$ZIG_BIN" ] && { echo "$ZIG_BIN"; return 0; }
+        say "ZIG_BIN is '$ZIG_BIN' but $dir/$ZIG_BIN is not an executable."
+        return 1
+    fi
+    local found
+    found=$(find "$dir" -maxdepth 1 -type f -perm -u+x ! -name '*.so' ! -name '*.so.*' -printf '%f\n' 2>/dev/null | sort)
+    local count
+    count=$(printf '%s' "$found" | grep -c . || true)
+    if [ "$count" -eq 1 ]; then
+        echo "$found"
+        return 0
+    fi
+    if [ "$count" -eq 0 ]; then
+        say "The build produced no executable in $dir."
+    else
+        say "The build produced several executables in $dir ($(echo $found)). Set ZIG_BIN to the one to run."
+    fi
+    return 1
+}
+
+# shellcheck disable=SC2086
+if grep -qs 'ziex' build.zig.zon; then
+    say "Ziex app: building ($optimize)"
+    zig build "${opt_flag[@]}" ${ZIG_BUILD_ARGS:-} || { say "zig build failed."; exit 1; }
+    zig build zx "${opt_flag[@]}" -- bundle || { say "zx bundle failed."; exit 1; }
+
+    # Copied over rather than replaced: Ziex keeps KV data under its root
+    # directory, and a rebuild must not take that with it.
+    mkdir -p .renode-app
+    cp -a bundle/. .renode-app/
+    bin=$(pick_bin .renode-app) || exit 1
+
+    say "Starting $bin on $ADDRESS:$PORT"
+    cd .renode-app || exit 1
+    exec "./$bin"
+fi
+
+say "Building ($optimize)"
+zig build "${opt_flag[@]}" ${ZIG_BUILD_ARGS:-} || { say "zig build failed."; exit 1; }
+bin=$(pick_bin zig-out/bin) || exit 1
+
+say "Starting $bin on $ADDRESS:$PORT"
+exec "./zig-out/bin/$bin"
