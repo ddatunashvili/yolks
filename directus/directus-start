@@ -7,7 +7,7 @@
 #                              on the first start. Later changes are made in
 #                              the app; bootstrap never touches an existing
 #                              administrator.
-#   DIRECTUS_DOMAIN            the address the app is reached on (PUBLIC_URL).
+#   CMS_DOMAIN            the address the app is reached on (PUBLIC_URL).
 # Every other Directus setting passes straight through from the environment.
 set -euo pipefail
 cd /home/container
@@ -29,8 +29,8 @@ if [[ -n "${DIRECTUS_ADMIN_PASSWORD:-}" ]]; then
     export ADMIN_PASSWORD="$DIRECTUS_ADMIN_PASSWORD"
 fi
 
-if [[ -n "${DIRECTUS_DOMAIN:-}" ]]; then
-    host="${DIRECTUS_DOMAIN#http://}"; host="${host#https://}"; host="${host%%/*}"
+if [[ -n "${CMS_DOMAIN:-}" ]]; then
+    host="${CMS_DOMAIN#http://}"; host="${host#https://}"; host="${host%%/*}"
     export PUBLIC_URL="https://${host}"
 else
     addr="${SERVER_IP:-}"
