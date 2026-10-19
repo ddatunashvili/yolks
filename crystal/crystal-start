@@ -1,0 +1,92 @@
+#!/bin/bash
+# Build the Crystal project in the current directory and run what it produced.
+#
+#   shard.yml with targets:  shards build --release, run the target.
+#   shard.yml without:       crystal build --release src/<name>.cr, run it.
+#
+# Environment:
+#   CRYSTAL_BIN         target to run; blank picks the only one there is
+#   CRYSTAL_BUILD_ARGS  extra arguments for the build (e.g. -Dpreview_mt)
+#   SERVER_PORT         exported as PORT, which Kemal and most servers read
+#
+# Everything this script says goes to stderr: some entrypoints capture the
+# startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[crystal-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f shard.yml ]; then
+    say "No shard.yml in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+export PORT="${PORT:-${SERVER_PORT:-3000}}"
+export HOST="${HOST:-0.0.0.0}"
+export ADDRESS="${ADDRESS:-0.0.0.0}"
+export KEMAL_ENV="${KEMAL_ENV:-production}"
+
+# The codegen thread count, held to the container's CPU limit: each thread
+# is another LLVM module in memory at once.
+threads=""
+if [ -r /sys/fs/cgroup/cpu.max ]; then
+    read -r quota period < /sys/fs/cgroup/cpu.max
+    if [ "$quota" != "max" ] && [ "${period:-0}" -gt 0 ]; then
+        threads=$(( (quota + period - 1) / period ))
+    fi
+fi
+thread_flag=()
+[ -n "$threads" ] && [ "$threads" -ge 1 ] && thread_flag=("--threads=$threads")
+
+if grep -qs '^dependencies:' shard.yml; then
+    say "Installing shards"
+    shards install >&2 || { say "shards install failed."; exit 1; }
+fi
+
+# Target names: the keys two spaces in under `targets:`.
+mapfile -t targets < <(awk '
+    /^targets:/ { in_t = 1; next }
+    /^[^[:space:]#]/ { in_t = 0 }
+    in_t && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ { sub(/^  /, ""); sub(/:.*/, ""); print }
+' shard.yml)
+
+# shellcheck disable=SC2086
+if [ "${#targets[@]}" -gt 0 ]; then
+    pick=""
+    if [ -n "${CRYSTAL_BIN:-}" ]; then
+        for t in "${targets[@]}"; do [ "$t" = "$CRYSTAL_BIN" ] && pick="$t"; done
+        [ -n "$pick" ] || { say "CRYSTAL_BIN is '$CRYSTAL_BIN' but shard.yml has no target by that name (${targets[*]})."; exit 1; }
+    elif [ "${#targets[@]}" -eq 1 ]; then
+        pick="${targets[0]}"
+    else
+        say "shard.yml has several targets (${targets[*]}). Set CRYSTAL_BIN to the one to run."
+        exit 1
+    fi
+    say "Building $pick (release)"
+    shards build "$pick" --release "${thread_flag[@]}" ${CRYSTAL_BUILD_ARGS:-} >&2 || { say "shards build failed."; exit 1; }
+    say "Starting $pick on $HOST:$PORT"
+    exec "./bin/$pick"
+fi
+
+# No targets: the conventional src/<name>.cr, else the only file in src/.
+name=$(sed -n 's/^name:[[:space:]]*["'"'"']\{0,1\}\([A-Za-z0-9_.-]*\).*/\1/p' shard.yml | head -1)
+main=""
+if [ -n "${CRYSTAL_BIN:-}" ] && [ -f "src/${CRYSTAL_BIN}.cr" ]; then
+    main="src/${CRYSTAL_BIN}.cr"; name="$CRYSTAL_BIN"
+elif [ -n "$name" ] && [ -f "src/$name.cr" ]; then
+    main="src/$name.cr"
+else
+    mapfile -t files < <(find src -maxdepth 1 -name '*.cr' 2>/dev/null | sort)
+    if [ "${#files[@]}" -eq 1 ]; then
+        main="${files[0]}"; name=$(basename "$main" .cr)
+    fi
+fi
+if [ -z "$main" ]; then
+    say "shard.yml declares no targets and there is no src/<name>.cr to build. Add a targets: section or set CRYSTAL_BIN."
+    exit 1
+fi
+
+mkdir -p bin
+say "Building $main (release)"
+crystal build "$main" -o "bin/$name" --release "${thread_flag[@]}" ${CRYSTAL_BUILD_ARGS:-} >&2 || { say "crystal build failed."; exit 1; }
+say "Starting $name on $HOST:$PORT"
+exec "./bin/$name"

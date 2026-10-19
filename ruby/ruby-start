@@ -1,0 +1,99 @@
+#!/bin/bash
+# Install the bundle for the Ruby project in the current directory and run it.
+#
+#   RUBY_START set:      bundle install, then that command.
+#   bin/rails present:   Rails server (db:prepare when there is a database to
+#                        prepare, assets:precompile when the app has assets).
+#   config.ru present:   rackup (or puma when rackup is not in the bundle).
+#   app.rb present:      ruby app.rb.
+#
+# Environment:
+#   RUBY_START        command to run instead of the detection above
+#   RAILS_ENV         production unless set (RACK_ENV and APP_ENV follow it)
+#   SERVER_PORT       exported as PORT, which Rails, Puma and Sinatra read
+#
+# Gems go to vendor/bundle inside the project, so a restart installs only
+# what changed. Everything this script says goes to stderr: some entrypoints
+# capture the startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[ruby-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f Gemfile ]; then
+    say "No Gemfile in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+export PORT="${PORT:-${SERVER_PORT:-3000}}"
+export BINDING="${BINDING:-0.0.0.0}"
+export RAILS_ENV="${RAILS_ENV:-production}"
+export RACK_ENV="${RACK_ENV:-$RAILS_ENV}"
+export APP_ENV="${APP_ENV:-$RACK_ENV}"
+export RAILS_LOG_TO_STDOUT="${RAILS_LOG_TO_STDOUT:-1}"
+export RAILS_SERVE_STATIC_FILES="${RAILS_SERVE_STATIC_FILES:-1}"
+
+export BUNDLE_PATH="${BUNDLE_PATH:-vendor/bundle}"
+if [ "$RAILS_ENV" = "production" ] && [ -z "${BUNDLE_WITHOUT:-}" ]; then
+    export BUNDLE_WITHOUT="development:test"
+fi
+
+jobs=$(nproc 2>/dev/null || echo 2)
+[ "$jobs" -gt 4 ] && jobs=4
+
+say "Installing gems into $BUNDLE_PATH${BUNDLE_WITHOUT:+ (without $BUNDLE_WITHOUT)}"
+bundle install --jobs "$jobs" >&2 || { say "bundle install failed."; exit 1; }
+
+in_bundle() { grep -qs "^    $1 " Gemfile.lock; }
+
+if [ -n "${RUBY_START:-}" ]; then
+    say "Running RUBY_START: $RUBY_START"
+    exec bash -c "$RUBY_START"
+fi
+
+if [ -x bin/rails ]; then
+    if [ "$RAILS_ENV" = "production" ] && [ -z "${SECRET_KEY_BASE:-}" ] && [ -z "${RAILS_MASTER_KEY:-}" ] && [ ! -f config/master.key ]; then
+        say "Neither SECRET_KEY_BASE nor RAILS_MASTER_KEY is set and config/master.key is missing; Rails will refuse to boot in production."
+    fi
+    # A database to prepare: DATABASE_URL, or an environment section in
+    # config/database.yml that names one (a Rails 8 app's SQLite files under
+    # storage/). `rails new --minimal` leaves production's commented out.
+    env_db=$(awk -v env="$RAILS_ENV" '
+        $0 ~ "^" env ":" { in_env = 1; next }
+        /^[^[:space:]#]/ { in_env = 0 }
+        in_env && /^[[:space:]]+database:/ { print "yes"; exit }
+    ' config/database.yml 2>/dev/null)
+    if [ -n "${DATABASE_URL:-}" ] || [ -n "$env_db" ]; then
+        say "Preparing the database (bin/rails db:prepare)"
+        bin/rails db:prepare >&2 || { say "db:prepare failed."; exit 1; }
+    fi
+    if [ "$RAILS_ENV" = "production" ] && { in_bundle propshaft || in_bundle sprockets || in_bundle sprockets-rails; }; then
+        say "Precompiling assets"
+        bin/rails assets:precompile >&2 || { say "assets:precompile failed."; exit 1; }
+    fi
+    say "Starting Rails ($RAILS_ENV) on $BINDING:$PORT"
+    exec bin/rails server -b "$BINDING" -p "$PORT"
+fi
+
+if [ -f config.ru ]; then
+    if bundle exec which rackup >/dev/null 2>&1; then
+        say "Starting rackup on $BINDING:$PORT"
+        exec bundle exec rackup -o "$BINDING" -p "$PORT"
+    fi
+    if in_bundle puma; then
+        say "Starting puma on $BINDING:$PORT"
+        exec bundle exec puma -b "tcp://$BINDING:$PORT"
+    fi
+    say "config.ru found but neither rackup nor puma is in the bundle. Add gem \"rackup\" (or \"puma\") to the Gemfile."
+    exit 1
+fi
+
+if [ -f app.rb ]; then
+    say "Starting app.rb on $BINDING:$PORT"
+    if in_bundle sinatra; then
+        exec bundle exec ruby app.rb -o "$BINDING" -p "$PORT"
+    fi
+    exec bundle exec ruby app.rb
+fi
+
+say "Found a Gemfile but nothing to start: no bin/rails, config.ru or app.rb. Set RUBY_START to the command that runs your app."
+exit 1

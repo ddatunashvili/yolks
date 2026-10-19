@@ -1,0 +1,54 @@
+name: ruby
+
+on:
+  push:
+    branches: [main]
+    paths: ['ruby/**', '.github/workflows/ruby.yml']
+  workflow_dispatch:
+  schedule:
+    # Monthly rebuild picks up Debian security updates.
+    - cron: '0 3 1 * *'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "4.0"
+            tags: ruby_4.0,ruby_latest
+          - version: "3.4"
+            tags: ruby_3.4
+          - version: "3.3"
+            tags: ruby_3.3
+          - version: "3.2"
+            tags: ruby_3.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/yolks"
+          out=""
+          for t in $(echo "${{ matrix.tags }}" | tr ',' ' '); do out="${out}${image}:${t},"; done
+          echo "list=${out%,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ruby
+          platforms: linux/amd64,linux/arm64
+          build-args: RUBY_VERSION=${{ matrix.version }}
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=ruby-${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=ruby-${{ matrix.version }}

@@ -1,0 +1,93 @@
+#!/bin/bash
+# Build the Cargo project in the current directory and run what it produced.
+#
+#   cargo build --release, then the binary from target/release.
+#
+# Environment:
+#   CARGO_FEATURES     features to enable, comma or space separated
+#   CARGO_BUILD_ARGS   extra arguments for `cargo build`
+#   RUST_BIN           binary to run; blank picks default-run or the only one
+#   CARGO_BUILD_JOBS   parallel rustc jobs; defaults to the container's CPU limit
+#   SERVER_PORT        exported as PORT, which most servers read
+#
+# CARGO_HOME and target/ are under /home/container, so a restart rebuilds
+# only what changed. Everything this script says goes to stderr: some
+# entrypoints capture the startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[rust-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f Cargo.toml ]; then
+    say "No Cargo.toml in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+export PORT="${PORT:-${SERVER_PORT:-3000}}"
+export ADDRESS="${ADDRESS:-0.0.0.0}"
+export HOST="${HOST:-0.0.0.0}"
+
+# nproc sees the host's cores, not the container's CPU limit, and every extra
+# rustc job is another few hundred MB at the peak of a build.
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+    jobs=""
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r quota period < /sys/fs/cgroup/cpu.max
+        if [ "$quota" != "max" ] && [ "${period:-0}" -gt 0 ]; then
+            jobs=$(( (quota + period - 1) / period ))
+        fi
+    fi
+    [ -n "$jobs" ] && [ "$jobs" -ge 1 ] && export CARGO_BUILD_JOBS="$jobs"
+fi
+
+args=(build --release --message-format=json-render-diagnostics)
+if [ -n "${CARGO_FEATURES:-}" ]; then
+    args+=(--features "${CARGO_FEATURES}")
+fi
+
+say "Building (release${CARGO_BUILD_JOBS:+, $CARGO_BUILD_JOBS jobs})"
+manifest=$(mktemp)
+# shellcheck disable=SC2086
+cargo "${args[@]}" ${CARGO_BUILD_ARGS:-} > "$manifest"
+status=$?
+if [ "$status" -ne 0 ]; then
+    rm -f "$manifest"
+    say "cargo build failed."
+    exit 1
+fi
+
+# Every binary target cargo reports, fresh or rebuilt, de-duplicated.
+mapfile -t bins < <(grep -o '"executable":"[^"]*"' "$manifest" | sed 's/^"executable":"//; s/"$//' | sort -u)
+rm -f "$manifest"
+
+pick=""
+if [ -n "${RUST_BIN:-}" ]; then
+    for b in "${bins[@]}"; do
+        [ "$(basename "$b")" = "$RUST_BIN" ] && pick="$b"
+    done
+    if [ -z "$pick" ] && [ -x "target/release/$RUST_BIN" ]; then
+        pick="target/release/$RUST_BIN"
+    fi
+    if [ -z "$pick" ]; then
+        say "RUST_BIN is '$RUST_BIN' but the build produced no binary by that name."
+        exit 1
+    fi
+elif [ "${#bins[@]}" -eq 1 ]; then
+    pick="${bins[0]}"
+elif [ "${#bins[@]}" -eq 0 ]; then
+    say "The build produced no binary. Is this a library crate? Add a [[bin]] or src/main.rs."
+    exit 1
+else
+    default=$(sed -n 's/^[[:space:]]*default-run[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+    for b in "${bins[@]}"; do
+        [ -n "$default" ] && [ "$(basename "$b")" = "$default" ] && pick="$b"
+    done
+    if [ -z "$pick" ]; then
+        names=""
+        for b in "${bins[@]}"; do names="$names $(basename "$b")"; done
+        say "The build produced several binaries ($names ). Set RUST_BIN to the one to run."
+        exit 1
+    fi
+fi
+
+say "Starting $(basename "$pick") on $ADDRESS:$PORT"
+exec "$pick"
