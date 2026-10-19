@@ -1,0 +1,89 @@
+#!/bin/bash
+# Starts Jellyfin on the server's allocation, everything under /home/container.
+#
+#   SERVER_PORT              written into config/network.xml on every start
+#                            (InternalHttpPort), since Jellyfin takes its
+#                            port from there and not from the command line.
+#   JELLYFIN_ADMIN_USER / JELLYFIN_ADMIN_PASSWORD
+#                            on the first start the setup wizard is completed
+#                            with this account, so the server is never left
+#                            open for whoever finds it first, and Movies, Shows
+#                            and Music libraries are pointed at ./media.
+#                            Change the password in Jellyfin afterwards; the
+#                            variable is only read while the wizard is open.
+set -euo pipefail
+cd /home/container
+say() { printf '%s\n' "$*" >&2; }
+
+PORT="${SERVER_PORT:-8096}"
+MEDIA=/home/container/media
+mkdir -p "$JELLYFIN_DATA_DIR" "$JELLYFIN_CONFIG_DIR" "$JELLYFIN_CACHE_DIR" "$JELLYFIN_LOG_DIR" \
+         "$MEDIA/movies" "$MEDIA/shows" "$MEDIA/music"
+
+NET="$JELLYFIN_CONFIG_DIR/network.xml"
+if [[ -f "$NET" ]] && grep -q '<InternalHttpPort>' "$NET"; then
+    sed -i -e "s|<InternalHttpPort>[0-9]*</InternalHttpPort>|<InternalHttpPort>${PORT}</InternalHttpPort>|" \
+           -e "s|<PublicHttpPort>[0-9]*</PublicHttpPort>|<PublicHttpPort>${PORT}</PublicHttpPort>|" \
+           -e "s|<AutoDiscovery>true</AutoDiscovery>|<AutoDiscovery>false</AutoDiscovery>|" \
+           -e "s|<EnableUPnP>true</EnableUPnP>|<EnableUPnP>false</EnableUPnP>|" "$NET"
+else
+    # No local discovery or UPnP: one TCP allocation is all a server has.
+    cat > "$NET" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<NetworkConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <InternalHttpPort>${PORT}</InternalHttpPort>
+  <PublicHttpPort>${PORT}</PublicHttpPort>
+  <EnableHttps>false</EnableHttps>
+  <AutoDiscovery>false</AutoDiscovery>
+  <EnableUPnP>false</EnableUPnP>
+  <EnableRemoteAccess>true</EnableRemoteAccess>
+</NetworkConfiguration>
+XML
+fi
+
+finish_wizard() {
+    local base="http://127.0.0.1:${PORT}" info i
+    for i in $(seq 1 180); do
+        info=$(curl -fsS "$base/System/Info/Public" 2>/dev/null) && break
+        sleep 2
+    done
+    [[ -n "${info:-}" ]] || { say "Renode: Jellyfin did not answer, setup wizard left as it is."; return; }
+    grep -q '"StartupWizardCompleted":false' <<<"$info" || return 0
+
+    local user="${JELLYFIN_ADMIN_USER:-admin}" pass="${JELLYFIN_ADMIN_PASSWORD:-}"
+    if [[ -z "$pass" ]]; then
+        say "Renode: JELLYFIN_ADMIN_PASSWORD is empty, finish the setup wizard in the browser."
+        return
+    fi
+    local json=(-fsS -H 'Content-Type: application/json')
+    curl "${json[@]}" -d '{"UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}' \
+        "$base/Startup/Configuration" >/dev/null
+    curl -fsS "$base/Startup/User" >/dev/null
+    curl "${json[@]}" -d "{\"Name\":\"${user}\",\"Password\":\"${pass}\"}" "$base/Startup/User" >/dev/null
+    curl "${json[@]}" -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' \
+        "$base/Startup/RemoteAccess" >/dev/null || true
+    curl -fsS -X POST "$base/Startup/Complete" >/dev/null
+    say "Renode: setup finished, sign in as ${user}."
+
+    local auth='MediaBrowser Client="Renode", Device="panel", DeviceId="renode-setup", Version="1.0"' token
+    token=$(curl "${json[@]}" -H "Authorization: $auth" \
+        -d "{\"Username\":\"${user}\",\"Pw\":\"${pass}\"}" "$base/Users/AuthenticateByName" \
+        | sed -n 's/.*"AccessToken":"\([^"]*\)".*/\1/p') || true
+    [[ -n "${token:-}" ]] || return 0
+    local name type dir
+    for spec in "Movies:movies:movies" "Shows:tvshows:shows" "Music:music:music"; do
+        IFS=: read -r name type dir <<<"$spec"
+        curl -fsS -X POST -H "Authorization: $auth, Token=\"$token\"" -H 'Content-Type: application/json' \
+            -d "{\"LibraryOptions\":{\"PathInfos\":[{\"Path\":\"$MEDIA/$dir\"}]}}" \
+            "$base/Library/VirtualFolders?name=${name}&collectionType=${type}&refreshLibrary=false" >/dev/null || true
+    done
+    curl -fsS -X POST -H "Authorization: $auth, Token=\"$token\"" "$base/Sessions/Logout" >/dev/null || true
+    say "Renode: libraries Movies, Shows and Music point at media/movies, media/shows and media/music."
+}
+finish_wizard &
+
+say "Renode: Jellyfin on 0.0.0.0:${PORT}, media library in ${MEDIA}"
+exec /opt/jellyfin/jellyfin \
+    --datadir "$JELLYFIN_DATA_DIR" --configdir "$JELLYFIN_CONFIG_DIR" \
+    --cachedir "$JELLYFIN_CACHE_DIR" --logdir "$JELLYFIN_LOG_DIR" \
+    --webdir "$JELLYFIN_WEB_DIR" --ffmpeg "$JELLYFIN_FFMPEG"

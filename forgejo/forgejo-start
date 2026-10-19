@@ -1,0 +1,124 @@
+#!/bin/bash
+# Starts Forgejo on the server's allocation, everything under /home/container.
+#
+# First start: writes custom/conf/app.ini (SQLite, built-in SSH off, install
+# locked, fresh secrets), migrates the database and creates the administrator
+# from FORGEJO_ADMIN_USER / FORGEJO_ADMIN_PASSWORD / FORGEJO_ADMIN_EMAIL.
+# Every start: the port, the public address and the registration switch are
+# rewritten in app.ini from the panel's variables; nothing else is touched,
+# so edits made to app.ini by hand survive.
+set -euo pipefail
+cd /home/container
+
+say() { printf '%s\n' "$*" >&2; }
+
+WORK=/home/container
+CONF="$WORK/custom/conf/app.ini"
+PORT="${SERVER_PORT:-3000}"
+
+if [[ -n "${FORGEJO_DOMAIN:-}" ]]; then
+    host="${FORGEJO_DOMAIN#http://}"; host="${host#https://}"; host="${host%%/*}"
+    ROOT_URL="https://${host}/"
+    DOMAIN="$host"
+else
+    addr="${SERVER_IP:-}"
+    [[ -z "$addr" || "$addr" == "0.0.0.0" ]] && addr="localhost"
+    ROOT_URL="http://${addr}:${PORT}/"
+    DOMAIN="$addr"
+fi
+
+case "${FORGEJO_DISABLE_REGISTRATION:-true}" in
+    1|true|TRUE|True) NOREG=true ;;
+    *) NOREG=false ;;
+esac
+
+mkdir -p "$WORK/custom/conf" "$WORK/data" "$WORK/repositories" "$WORK/log"
+
+if [[ ! -f "$CONF" ]]; then
+    say "Renode: writing $CONF"
+    secret_key=$(forgejo generate secret SECRET_KEY)
+    internal_token=$(forgejo generate secret INTERNAL_TOKEN)
+    jwt_secret=$(forgejo generate secret JWT_SECRET)
+    lfs_jwt_secret=$(forgejo generate secret LFS_JWT_SECRET)
+    umask 077
+    cat > "$CONF" <<INI
+APP_NAME = Forgejo
+RUN_USER = ${USER:-container}
+RUN_MODE = prod
+WORK_PATH = $WORK
+
+[server]
+PROTOCOL = http
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = $PORT
+DOMAIN = $DOMAIN
+ROOT_URL = $ROOT_URL
+APP_DATA_PATH = $WORK/data
+DISABLE_SSH = true
+START_SSH_SERVER = false
+LFS_START_SERVER = true
+LFS_JWT_SECRET = $lfs_jwt_secret
+
+[database]
+DB_TYPE = sqlite3
+PATH = $WORK/data/forgejo.db
+SQLITE_JOURNAL_MODE = WAL
+
+[repository]
+ROOT = $WORK/repositories
+
+[lfs]
+PATH = $WORK/data/lfs
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = $secret_key
+INTERNAL_TOKEN = $internal_token
+
+[oauth2]
+JWT_SECRET = $jwt_secret
+
+[service]
+DISABLE_REGISTRATION = $NOREG
+REQUIRE_SIGNIN_VIEW = false
+
+[session]
+PROVIDER = file
+
+[log]
+MODE = console
+LEVEL = info
+ROOT_PATH = $WORK/log
+INI
+    umask 022
+fi
+
+# Keep what the panel decides current; leave the rest of the file alone.
+sed -i \
+    -e "s|^HTTP_PORT *=.*|HTTP_PORT = $PORT|" \
+    -e "s|^HTTP_ADDR *=.*|HTTP_ADDR = 0.0.0.0|" \
+    -e "s|^ROOT_URL *=.*|ROOT_URL = $ROOT_URL|" \
+    -e "s|^DOMAIN *=.*|DOMAIN = $DOMAIN|" \
+    -e "s|^DISABLE_REGISTRATION *=.*|DISABLE_REGISTRATION = $NOREG|" \
+    -e "s|^RUN_USER *=.*|RUN_USER = ${USER:-container}|" \
+    "$CONF"
+
+forgejo migrate --config "$CONF" --work-path "$WORK" >&2
+
+if [[ ! -f "$WORK/data/.renode-admin" ]]; then
+    if [[ -z "${FORGEJO_ADMIN_PASSWORD:-}" ]]; then
+        say "Renode: FORGEJO_ADMIN_PASSWORD is empty, no administrator created. Set it on the Startup tab and restart."
+    elif forgejo admin user create --config "$CONF" --work-path "$WORK" \
+            --admin --username "${FORGEJO_ADMIN_USER:-owner}" \
+            --password "$FORGEJO_ADMIN_PASSWORD" \
+            --email "${FORGEJO_ADMIN_EMAIL:-owner@example.com}" \
+            --must-change-password=false >&2; then
+        say "Renode: administrator ${FORGEJO_ADMIN_USER:-owner} created."
+        touch "$WORK/data/.renode-admin"
+    else
+        say "Renode: could not create the administrator (see above)."
+    fi
+fi
+
+say "Renode: Forgejo on 0.0.0.0:${PORT}, public address ${ROOT_URL}"
+exec forgejo web --config "$CONF" --work-path "$WORK"

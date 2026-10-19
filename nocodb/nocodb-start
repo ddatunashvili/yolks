@@ -1,0 +1,37 @@
+#!/bin/bash
+# Starts NocoDB on the server's allocation, its data in ./nocodb.
+#
+#   NC_ADMIN_EMAIL / NOCODB_ADMIN_PASSWORD  the super admin, created on the
+#       first start and kept in step with these on every start after.
+#   NC_JWT_SECRET  signs sessions; generated per server.
+#   NOCODB_DOMAIN  the address the app is reached on, for links in mails.
+set -euo pipefail
+cd /home/container
+
+say() { printf '%s\n' "$*" >&2; }
+
+export PORT="${SERVER_PORT:-8080}"
+export NC_TOOL_DIR="${NC_TOOL_DIR:-/home/container/nocodb/}"
+mkdir -p "$NC_TOOL_DIR"
+
+if [[ -n "${NC_JWT_SECRET:-}" ]]; then
+    export NC_AUTH_JWT_SECRET="$NC_JWT_SECRET"
+else
+    say "Renode: NC_JWT_SECRET is empty; NocoDB will generate and store its own."
+fi
+
+if [[ -n "${NOCODB_ADMIN_PASSWORD:-}" && -n "${NC_ADMIN_EMAIL:-}" ]]; then
+    export NC_ADMIN_PASSWORD="$NOCODB_ADMIN_PASSWORD"
+else
+    unset NC_ADMIN_PASSWORD
+    say "Renode: no super admin configured; the first account to sign up becomes it."
+fi
+
+if [[ -n "${NOCODB_DOMAIN:-}" ]]; then
+    host="${NOCODB_DOMAIN#http://}"; host="${host#https://}"; host="${host%%/*}"
+    export NC_PUBLIC_URL="https://${host}"
+fi
+
+say "Renode: NocoDB on 0.0.0.0:${PORT}, data in ${NC_TOOL_DIR}"
+cd /usr/src/app
+exec node docker/index.js

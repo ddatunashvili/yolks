@@ -1,0 +1,44 @@
+#!/bin/bash
+# Starts Directus on the server's allocation, everything under /home/container.
+#
+#   DIRECTUS_SECRET            signs tokens; generated per server.
+#   ADMIN_EMAIL / DIRECTUS_ADMIN_PASSWORD
+#                              the administrator `directus bootstrap` creates
+#                              on the first start. Later changes are made in
+#                              the app; bootstrap never touches an existing
+#                              administrator.
+#   DIRECTUS_DOMAIN            the address the app is reached on (PUBLIC_URL).
+# Every other Directus setting passes straight through from the environment.
+set -euo pipefail
+cd /home/container
+
+say() { printf '%s\n' "$*" >&2; }
+
+export PORT="${SERVER_PORT:-8055}"
+export HOST=0.0.0.0
+mkdir -p "$(dirname "$DB_FILENAME")" "$STORAGE_LOCAL_ROOT" "$EXTENSIONS_PATH"
+
+if [[ -z "${DIRECTUS_SECRET:-}" ]]; then
+    say "Renode: DIRECTUS_SECRET is empty. Set it on the Startup tab; Directus will not start without one."
+    exit 1
+fi
+export SECRET="$DIRECTUS_SECRET"
+export KEY="${KEY:-$DIRECTUS_SECRET}"
+
+if [[ -n "${DIRECTUS_ADMIN_PASSWORD:-}" ]]; then
+    export ADMIN_PASSWORD="$DIRECTUS_ADMIN_PASSWORD"
+fi
+
+if [[ -n "${DIRECTUS_DOMAIN:-}" ]]; then
+    host="${DIRECTUS_DOMAIN#http://}"; host="${host#https://}"; host="${host%%/*}"
+    export PUBLIC_URL="https://${host}"
+else
+    addr="${SERVER_IP:-}"
+    [[ -z "$addr" || "$addr" == "0.0.0.0" ]] && addr="localhost"
+    export PUBLIC_URL="${PUBLIC_URL:-http://${addr}:${PORT}}"
+fi
+
+cd /directus
+node cli.js bootstrap >&2
+say "Renode: Directus on 0.0.0.0:${PORT}, data in /home/container"
+exec node cli.js start

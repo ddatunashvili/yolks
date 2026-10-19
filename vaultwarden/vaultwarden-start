@@ -1,0 +1,44 @@
+#!/bin/bash
+# Starts Vaultwarden on the server's allocation, with its data in ./data.
+#
+#   VW_ADMIN_PASSWORD  the /admin page password; hashed with argon2 on every
+#                      start and handed over as ADMIN_TOKEN. Empty disables
+#                      the admin page.
+#   VW_DOMAIN          the https:// address the vault is reached on, for
+#                      links in mails, attachments and WebAuthn.
+#   SIGNUPS_ALLOWED    and every other Vaultwarden setting pass straight
+#                      through from the environment.
+set -euo pipefail
+cd /home/container
+
+say() { printf '%s\n' "$*" >&2; }
+
+export ROCKET_PORT="${SERVER_PORT:-${ROCKET_PORT:-8080}}"
+export ROCKET_ADDRESS="${ROCKET_ADDRESS:-0.0.0.0}"
+export DATA_FOLDER="${DATA_FOLDER:-/home/container/data}"
+export WEB_VAULT_FOLDER="${WEB_VAULT_FOLDER:-/web-vault}"
+mkdir -p "$DATA_FOLDER"
+
+if [[ -n "${VW_ADMIN_PASSWORD:-}" ]]; then
+    salt=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 22)
+    # OWASP parameters, the same ones `vaultwarden hash` uses.
+    ADMIN_TOKEN=$(printf '%s' "$VW_ADMIN_PASSWORD" | argon2 "$salt" -e -id -k 65540 -t 3 -p 4)
+    export ADMIN_TOKEN
+else
+    unset ADMIN_TOKEN
+    say "Renode: no admin password set, the /admin page is disabled."
+fi
+
+if [[ -n "${VW_DOMAIN:-}" ]]; then
+    case "$VW_DOMAIN" in
+        http://*|https://*) export DOMAIN="$VW_DOMAIN" ;;
+        *) export DOMAIN="https://${VW_DOMAIN}" ;;
+    esac
+fi
+
+if [[ -f "$DATA_FOLDER/config.json" ]]; then
+    say "Renode: $DATA_FOLDER/config.json exists; settings saved on the /admin page override the panel's variables."
+fi
+
+say "Renode: Vaultwarden on 0.0.0.0:${ROCKET_PORT}, data in ${DATA_FOLDER}"
+exec /vaultwarden
