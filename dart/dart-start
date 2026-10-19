@@ -1,0 +1,56 @@
+#!/bin/bash
+# Build the Dart project in the current directory and run what it produced.
+#
+#   Dart Frog (pubspec.yaml depends on dart_frog): `dart_frog build`, then the
+#   generated build/bin/server.dart compiled to a native executable.
+#   Anything else: DART_MAIN (bin/server.dart) compiled with `dart compile exe`.
+#
+# Environment:
+#   DART_MAIN    entry file, relative to this folder (bin/server.dart)
+#   SERVER_PORT  exported as PORT, which shelf and Dart Frog servers read
+#
+# Everything this script says goes to stderr: some entrypoints capture the
+# startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[dart-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f pubspec.yaml ]; then
+    say "No pubspec.yaml in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+export PORT="${PORT:-${SERVER_PORT:-8080}}"
+export ADDRESS="${ADDRESS:-0.0.0.0}"
+export PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+export PATH="$PUB_CACHE/bin:$PATH"
+
+say "Fetching dependencies"
+dart pub get >&2 || { say "dart pub get failed."; exit 1; }
+
+mkdir -p .renode-app
+
+if grep -Eqs '^[[:space:]]+dart_frog:' pubspec.yaml; then
+    if ! command -v dart_frog >/dev/null 2>&1; then
+        say "Installing dart_frog_cli (once; kept in $PUB_CACHE)"
+        dart pub global activate dart_frog_cli >&2 || { say "Could not install dart_frog_cli."; exit 1; }
+    fi
+    say "Dart Frog project: dart_frog build"
+    dart_frog build >&2 || { say "dart_frog build failed."; exit 1; }
+    (cd build && dart pub get >&2) || { say "dart pub get in build/ failed."; exit 1; }
+    say "Compiling build/bin/server.dart"
+    dart compile exe build/bin/server.dart -o .renode-app/server >&2 \
+        || { say "dart compile exe failed."; exit 1; }
+else
+    main="${DART_MAIN:-bin/server.dart}"
+    if [ ! -f "$main" ]; then
+        say "The entry file $main does not exist. Set DART_MAIN on the Startup tab to your server's main file."
+        exit 1
+    fi
+    say "Compiling $main"
+    dart compile exe "$main" -o .renode-app/server >&2 \
+        || { say "dart compile exe failed."; exit 1; }
+fi
+
+say "Starting on $ADDRESS:$PORT"
+exec ./.renode-app/server

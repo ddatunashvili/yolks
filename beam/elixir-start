@@ -1,0 +1,86 @@
+#!/bin/bash
+# Fetch, compile and run the Mix project in the current directory.
+#
+#   Phoenix (mix.exs depends on :phoenix): PHX_SERVER=true, SECRET_KEY_BASE
+#   required in prod, `mix assets.deploy` when the project defines that
+#   alias, then `mix phx.server`.
+#   Anything else: `mix run --no-halt`.
+#
+# Environment:
+#   MIX_ENV          prod (default), dev or test
+#   ELIXIR_START     command to run instead of the automatic choice
+#   SECRET_KEY_BASE  required by Phoenix in prod; the egg generates one
+#   PHX_HOST         the public host name Phoenix builds URLs and checks
+#                    websocket origins against
+#   SERVER_PORT      exported as PORT, which Phoenix's runtime.exs reads
+#
+# Everything this script says goes to stderr: some entrypoints capture the
+# startup command's stdout and execute it.
+set -u
+
+say() { printf '\033[1m\033[36m[elixir-start]\033[0m %s\n' "$*" >&2; }
+
+if [ ! -f mix.exs ]; then
+    say "No mix.exs in $(pwd). Upload your project with SFTP or the file manager, or link a repository on the GitHub tab."
+    exit 1
+fi
+
+export MIX_ENV="${MIX_ENV:-prod}"
+case "$MIX_ENV" in
+    prod|dev|test) ;;
+    *) say "MIX_ENV must be prod, dev or test, not '$MIX_ENV'."; exit 1 ;;
+esac
+
+export PORT="${PORT:-${SERVER_PORT:-4000}}"
+
+phoenix=0
+if grep -Eqs '\{[[:space:]]*:phoenix[[:space:]]*,' mix.exs; then
+    phoenix=1
+fi
+
+if [ "$phoenix" = 1 ]; then
+    export PHX_SERVER=true
+    if [ -z "${SECRET_KEY_BASE:-}" ]; then
+        if [ "$MIX_ENV" = prod ]; then
+            say "SECRET_KEY_BASE is empty. Phoenix refuses to start in prod without one: set it on the Startup tab (64 or more characters; mix phx.gen.secret makes one)."
+            exit 1
+        fi
+    elif [ "${#SECRET_KEY_BASE}" -lt 64 ]; then
+        say "SECRET_KEY_BASE is ${#SECRET_KEY_BASE} characters; Phoenix needs at least 64."
+        exit 1
+    fi
+    if [ -z "${PHX_HOST:-}" ]; then
+        export PHX_HOST=localhost
+        say "PHX_HOST is empty, using localhost. Set it to your domain on the Startup tab, or LiveView websockets from that domain are refused."
+    fi
+fi
+
+# Hex and rebar live in MIX_HOME, under the server's folder, so they are
+# fetched once and survive restarts.
+mix local.hex --force --if-missing >&2 || { say "Could not install Hex."; exit 1; }
+mix local.rebar --force --if-missing >&2 || { say "Could not install rebar."; exit 1; }
+
+say "Fetching dependencies (MIX_ENV=$MIX_ENV)"
+mix deps.get --only "$MIX_ENV" >&2 || { say "mix deps.get failed."; exit 1; }
+
+say "Compiling"
+mix compile >&2 || { say "mix compile failed."; exit 1; }
+
+if [ "$phoenix" = 1 ] && grep -qs '"assets.deploy"' mix.exs; then
+    say "Building assets (mix assets.deploy)"
+    mix assets.deploy >&2 || { say "mix assets.deploy failed."; exit 1; }
+fi
+
+if [ -n "${ELIXIR_START:-}" ]; then
+    say "Starting: $ELIXIR_START (port $PORT)"
+    # shellcheck disable=SC2086
+    exec $ELIXIR_START
+fi
+
+if [ "$phoenix" = 1 ]; then
+    say "Starting Phoenix on port $PORT (host $PHX_HOST)"
+    exec mix phx.server
+fi
+
+say "Starting: mix run --no-halt (port $PORT)"
+exec mix run --no-halt

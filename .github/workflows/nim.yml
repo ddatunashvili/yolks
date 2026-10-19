@@ -1,0 +1,50 @@
+name: nim
+
+on:
+  push:
+    branches: [main]
+    paths: ['nim/**', '.github/workflows/nim.yml']
+  workflow_dispatch:
+  schedule:
+    # Monthly rebuild picks up Debian security updates.
+    - cron: '0 3 1 * *'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: 2.2.12
+            tags: nim_2.2,nim_latest
+          - version: 2.0.16
+            tags: nim_2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/yolks"
+          out=""
+          for t in $(echo "${{ matrix.tags }}" | tr ',' ' '); do out="${out}${image}:${t},"; done
+          echo "list=${out%,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: nim
+          platforms: linux/amd64,linux/arm64
+          build-args: NIM_VERSION=${{ matrix.version }}
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=nim-${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=nim-${{ matrix.version }}
