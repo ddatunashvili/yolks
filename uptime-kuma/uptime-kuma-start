@@ -1,0 +1,36 @@
+#!/bin/bash
+# Runs the Uptime Kuma release the egg installed into ./kuma, keeping its
+# database and uploads in ./data. Everything said here goes to stderr.
+set -euo pipefail
+
+say() { echo "[uptime-kuma-start] $*" >&2; }
+
+ROOT=$(pwd)
+APP="${ROOT}/kuma"
+DATA="${ROOT}/data"
+
+if [[ ! -f "${APP}/server/server.js" ]]; then
+    say "No Uptime Kuma in ${APP}: server/server.js is missing."
+    say "Reinstall the server from the panel (Settings > Reinstall) to download it again; ./data is kept."
+    exit 1
+fi
+if [[ ! -d "${APP}/dist" ]]; then
+    say "The web interface (kuma/dist) is missing. Reinstall the server to download it again."
+    exit 1
+fi
+
+mkdir -p "${DATA}"
+# SQLite is the only database this image can run unattended; preseeding the
+# choice skips the first-run database page, which offers MariaDB too.
+if [[ ! -f "${DATA}/db-config.json" ]]; then
+    echo '{"type":"sqlite"}' > "${DATA}/db-config.json"
+fi
+
+export PORT="${UPTIME_KUMA_PORT:-${SERVER_PORT:-3001}}"
+export UPTIME_KUMA_PORT="${PORT}"
+export UPTIME_KUMA_HOST="${UPTIME_KUMA_HOST:-0.0.0.0}"
+export DATA_DIR="${DATA}/"
+
+say "Uptime Kuma $(node -p "require('${APP}/package.json').version") on ${UPTIME_KUMA_HOST}:${PORT}, data in ${DATA}"
+cd "${APP}"
+exec node server/server.js --port="${PORT}" --host="${UPTIME_KUMA_HOST}" --data-dir="${DATA}/"

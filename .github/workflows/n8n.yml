@@ -1,0 +1,49 @@
+name: n8n
+
+on:
+  push:
+    branches: [main]
+    paths: ['n8n/**', '.github/workflows/n8n.yml']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'n8n version (empty = the latest stable on npm)'
+        required: false
+  schedule:
+    # Weekly: picks up a new n8n release and base-image security updates.
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ]; then version=$(npm view n8n dist-tags.latest); fi
+          minor=$(echo "$version" | cut -d. -f1,2)
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/yolks"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tags=${image}:app_n8n,${image}:app_n8n_${minor}" >> "$GITHUB_OUTPUT"
+          echo "n8n ${version} -> app_n8n, app_n8n_${minor}"
+      - uses: docker/build-push-action@v6
+        with:
+          context: n8n
+          platforms: linux/amd64,linux/arm64
+          build-args: N8N_VERSION=${{ steps.meta.outputs.version }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=app-n8n
+          cache-to: type=gha,mode=max,scope=app-n8n
