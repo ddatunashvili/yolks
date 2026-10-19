@@ -42,7 +42,7 @@ if [ "$phoenix" = 1 ]; then
     export PHX_SERVER=true
     if [ -z "${SECRET_KEY_BASE:-}" ]; then
         if [ "$MIX_ENV" = prod ]; then
-            say "SECRET_KEY_BASE is empty. Phoenix refuses to start in prod without one: set it on the Startup tab (64 or more characters; mix phx.gen.secret makes one)."
+            say "SECRET_KEY_BASE is empty. Phoenix refuses to start in prod without one (64 or more characters; mix phx.gen.secret makes one). The panel generates it when the server is created."
             exit 1
         fi
     elif [ "${#SECRET_KEY_BASE}" -lt 64 ]; then
@@ -51,7 +51,7 @@ if [ "$phoenix" = 1 ]; then
     fi
     if [ -z "${PHX_HOST:-}" ]; then
         export PHX_HOST=localhost
-        say "PHX_HOST is empty, using localhost. Set it to your domain on the Startup tab, or LiveView websockets from that domain are refused."
+        say "PHX_HOST is empty, using localhost. Set PHX_HOST to your domain (or set check_origin in config/runtime.exs), or LiveView websockets from that domain are refused."
     fi
 fi
 
